@@ -12,16 +12,25 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/umaaamm/contact/graph/model"
+	"github.com/umaaamm/contact/internal/auth"
+	"github.com/umaaamm/contact/internal/users"
 	"github.com/umaaamm/contact/mongo"
+	"github.com/umaaamm/contact/pkg/jwt"
 )
 
 // CreateLink is the resolver for the createLink field.
 func (r *mutationResolver) CreateLink(ctx context.Context, input model.NewLink) (*model.Link, error) {
+	user := auth.ForContext(ctx)
+	// println(user.Username)
+	if user == nil {
+		return nil, fmt.Errorf("access denied")
+	}
+
 	link := &model.Link{
 		ID:      primitive.NewObjectID().Hex(),
 		Title:   input.Title,
 		Address: input.Address,
-		User:    &model.User{Name: "admin", ID: primitive.NewObjectID().Hex()},
+		User:    &model.User{Name: user.Username, ID: user.ID},
 	}
 
 	res, err := mongo.DB.Collection("link").InsertOne(ctx, link)
@@ -36,32 +45,55 @@ func (r *mutationResolver) CreateLink(ctx context.Context, input model.NewLink) 
 
 // CreateUser is the resolver for the createUser field.
 func (r *mutationResolver) CreateUser(ctx context.Context, input model.NewUser) (string, error) {
-	user := &model.NewUser{
-		Username: input.Username,
-		Password: input.Password,
-	}
-
-	res, err := mongo.DB.Collection("user").InsertOne(ctx, user)
+	var user users.User
+	user.Username = input.Username
+	user.Password = input.Password
+	user.Create()
+	token, err := jwt.GenerateToken(user.Username)
 	if err != nil {
 		return "", err
 	}
-
-	return res.InsertedID.(primitive.ObjectID).Hex(), nil
+	return token, nil
 }
 
 // Login is the resolver for the login field.
 func (r *mutationResolver) Login(ctx context.Context, input model.Login) (string, error) {
-	panic(fmt.Errorf("not implemented: Login - login"))
+	var user users.User
+	user.Username = input.Username
+	user.Password = input.Password
+	correct := user.Authenticate()
+	if !correct {
+		// 1
+		return "", &users.WrongUsernameOrPasswordError{}
+	}
+	token, err := jwt.GenerateToken(user.Username)
+	if err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 // RefreshToken is the resolver for the refreshToken field.
 func (r *mutationResolver) RefreshToken(ctx context.Context, input model.RefreshTokenInput) (string, error) {
-	panic(fmt.Errorf("not implemented: RefreshToken - refreshToken"))
+	username, err := jwt.ParseToken(input.Token)
+	if err != nil {
+		return "", fmt.Errorf("access denied")
+	}
+	token, err := jwt.GenerateToken(username)
+	if err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 // Links is the resolver for the links field.
 func (r *queryResolver) Links(ctx context.Context) ([]*model.Link, error) {
 	var links []*model.Link
+
+	user := auth.ForContext(ctx)
+	if user == nil {
+		return []*model.Link{&model.Link{}}, fmt.Errorf("access denied")
+	}
 
 	cursor, err := mongo.DB.Collection("link").Find(ctx, bson.D{})
 	if err != nil {
@@ -69,6 +101,10 @@ func (r *queryResolver) Links(ctx context.Context) ([]*model.Link, error) {
 	}
 	if err = cursor.All(ctx, &links); err != nil {
 		return nil, err
+	}
+
+	for _, link := range links {
+		link.User = &model.User{Name: user.Username, ID: user.ID}
 	}
 
 	return links, nil
